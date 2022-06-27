@@ -266,7 +266,7 @@ func main() {
 		log.Info("no config newrelic")
 	}
 
-	e.Use(middleware.Logger())
+	//e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
 	e.POST("/initialize", postInitialize)
@@ -1150,10 +1150,9 @@ func getTrend(c echo.Context) error {
 	characterList := []Isu{}
 	const query = "SELECT `character` FROM `isu` GROUP BY `character`"
 	s := createDataBaseSegment(query)
-	s.StartTime = nrecho.FromContext(c).StartSegmentNow()
+	s.StartTime = txn.StartSegmentNow()
 	err := db.Select(&characterList, query)
 	defer s.End()
-	//
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1244,7 +1243,7 @@ func postIsuCondition(c echo.Context) error {
 	defer txn.End()
 	dropProbability := 0.9
 	if rand.Float64() <= dropProbability {
-		c.Logger().Warnf("drop post isu condition request")
+		//c.Logger().Warnf("drop post isu condition request")
 		return c.NoContent(http.StatusAccepted)
 	}
 
