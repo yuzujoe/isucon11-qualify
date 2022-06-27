@@ -1281,50 +1281,34 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
+	request := []map[string]interface{}{}
 	for _, cond := range req {
 		timestamp := time.Unix(cond.Timestamp, 0)
 		if !isValidConditionFormat(cond.Condition) {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
 
-		insert_isu_condition_query := "INSERT INTO `isu_condition`" +
-			"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)" +
-			"	VALUES (?, ?, ?, ?, ?)"
-		insert_isu_condition := createDataBaseSegment(insert_isu_condition_query, jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
-		insert_isu_condition.StartTime = txn.StartSegmentNow()
-		_, err = tx.Exec(
-			insert_isu_condition_query,
-			jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
-		defer insert_isu_condition.End()
+		request = append(request, map[string]interface{}{
+			"jia_isu_uuid": jiaIsuUUID,
+			"timestamp":    timestamp,
+			"is_sitting":   cond.IsSitting,
+			"condition":    cond.Condition,
+			"message":      cond.Message,
+		})
+	}
+
+	insert_isu_condition_query := "INSERT INTO isu_condition (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`) " +
+		"VALUES (:jia_isu_uuid, :timestamp, :is_sitting, :condition, :message)"
+	insert_isu_condition := createDataBaseSegment(insert_isu_condition_query, request)
+	insert_isu_condition.StartTime = txn.StartSegmentNow()
+	_, err = tx.NamedExec(insert_isu_condition_query, request)
+	defer insert_isu_condition.End()
+	if err != nil {
 		if err != nil {
 			c.Logger().Errorf("db error: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
 	}
-
-	//request := []BulkInsertPostIsuConditionRequest{}
-	//for i := 0; i < len(req); i++ {
-	//	timestamp := time.Unix(req[i].Timestamp, 0)
-	//
-	//	request[i].JiaIsuUUID = jiaIsuUUID
-	//	request[i].Timestamp = timestamp
-	//	request[i].IsSitting = req[i].IsSitting
-	//	request[i].Condition = req[i].Condition
-	//	request[i].Message = req[i].Message
-	//}
-	//
-	//insert_isu_condition_query := "INSERT INTO isu_condition (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`) " +
-	//	"VALUES (`:jia_isu_uuid`, `:timestamp`, `:is_sitting`, `:condition`, `:message`)"
-	//insert_isu_condition := createDataBaseSegment(insert_isu_condition_query, request)
-	//insert_isu_condition.StartTime = txn.StartSegmentNow()
-	//_, err = tx.NamedExec(insert_isu_condition_query, request)
-	//if err != nil {
-	//	if err != nil {
-	//		c.Logger().Errorf("db error: %v", err)
-	//		return c.NoContent(http.StatusInternalServerError)
-	//	}
-	//}
-	//defer insert_isu_condition.End()
 
 	err = tx.Commit()
 	if err != nil {
