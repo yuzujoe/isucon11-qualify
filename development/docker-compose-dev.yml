@@ -12,6 +12,7 @@ services:
       MYSQL_USER: isucon
       MYSQL_PASS: isucon
       POST_ISUCONDITION_TARGET_BASE_URL: http://backend-go:3000
+      NEW_RELIC_LICENSE_KEY: 4d6b1fb1c2c1cf2a7c9be5d086e4f7297e0fNRAL
     entrypoint: dockerize -wait tcp://mysql-backend:3306 -timeout 60s
     command: air -c /development/air.toml
     ports:

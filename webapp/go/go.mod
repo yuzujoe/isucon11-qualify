@@ -7,7 +7,15 @@ require (
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/gorilla/sessions v1.2.1
 	github.com/jmoiron/sqlx v1.3.4
-	github.com/labstack/echo/v4 v4.3.0
-	github.com/labstack/gommon v0.3.0
-	golang.org/x/crypto v0.0.0-20210513164829-c07d793c2f9a // indirect
+	github.com/labstack/echo/v4 v4.7.2
+	github.com/labstack/gommon v0.3.1
+	github.com/mattn/go-colorable v0.1.12 // indirect
+	github.com/newrelic/go-agent/v3 v3.16.1 // indirect
+	github.com/newrelic/go-agent/v3/integrations/nrecho-v4 v1.0.2 // indirect
+	github.com/newrelic/go-agent/v3/integrations/nrmysql v1.2.1 // indirect
+	golang.org/x/crypto v0.0.0-20220622213112-05595931fe9d // indirect
+	golang.org/x/net v0.0.0-20220624214902-1bab6f366d9e // indirect
+	golang.org/x/sys v0.0.0-20220624220833-87e55d714810 // indirect
+	golang.org/x/time v0.0.0-20220609170525-579cf78fd858 // indirect
+	google.golang.org/genproto v0.0.0-20220624142145-8cd45d7dbd1f // indirect
 )

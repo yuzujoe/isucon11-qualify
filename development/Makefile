@@ -1,3 +1,11 @@
+.PHONY: run-go
+run-go:
+	docker-compose -f docker-compose-dev.yml up --build -- backend-go
+
+.PHONY: run-dev
+run-dev:
+	docker-compose -f docker-compose-dev.yml up -d --build -- mysql-backend jiaapi-mock
+
 .PHONY: up-dev
 up-dev:
 	docker-compose -f docker-compose-dev.yml up --build -- mysql-backend jiaapi-mock

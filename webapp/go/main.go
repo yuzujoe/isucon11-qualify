@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/newrelic/go-agent/v3/integrations/nrecho-v4"
+	"github.com/newrelic/go-agent/v3/newrelic"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +27,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
+	_ "github.com/newrelic/go-agent/v3/integrations/nrmysql"
 )
 
 const (
@@ -50,6 +54,32 @@ var (
 	jiaJWTSigningKey *ecdsa.PublicKey
 
 	postIsuConditionTargetBaseURL string // JIAへのactivate時に登録する，ISUがconditionを送る先のURL
+
+	basicTable        = `[^)(\]\[\}\{\s,;]+`
+	enclosedTable     = `[\[\(\{]` + `\s*` + basicTable + `\s*` + `[\]\)\}]`
+	tablePattern      = `(` + `\s+` + basicTable + `|` + `\s*` + enclosedTable + `)`
+	extractTableRegex = regexp.MustCompile(`[\s` + "`" + `"'\(\)\{\}\[\]]*`)
+	updateRegex       = regexp.MustCompile(`(?is)^update(?:\s+(?:low_priority|ignore|or|rollback|abort|replace|fail|only))*` + tablePattern)
+	sqlOperations     = map[string]*regexp.Regexp{
+		"select":   regexp.MustCompile(`(?is)^.*?\sfrom` + tablePattern),
+		"delete":   regexp.MustCompile(`(?is)^.*?\sfrom` + tablePattern),
+		"insert":   regexp.MustCompile(`(?is)^.*?\sinto?` + tablePattern),
+		"update":   updateRegex,
+		"call":     nil,
+		"create":   nil,
+		"drop":     nil,
+		"show":     nil,
+		"set":      nil,
+		"exec":     nil,
+		"execute":  nil,
+		"alter":    nil,
+		"commit":   nil,
+		"rollback": nil,
+	}
+	firstWordRegex   = regexp.MustCompile(`^\w+`)
+	cCommentRegex    = regexp.MustCompile(`(?is)/\*.*?\*/`)
+	lineCommentRegex = regexp.MustCompile(`(?im)(?:--|#).*?$`)
+	sqlPrefixRegex   = regexp.MustCompile(`^[\s;]*`)
 )
 
 type Config struct {
@@ -165,6 +195,14 @@ type PostIsuConditionRequest struct {
 	Timestamp int64  `json:"timestamp"`
 }
 
+type BulkInsertPostIsuConditionRequest struct {
+	JiaIsuUUID string    `json:"jia_isu_uuid"`
+	IsSitting  bool      `json:"is_sitting"`
+	Condition  string    `json:"condition"`
+	Message    string    `json:"message"`
+	Timestamp  time.Time `json:"timestamp"`
+}
+
 type JIAServiceRequest struct {
 	TargetBaseURL string `json:"target_base_url"`
 	IsuUUID       string `json:"isu_uuid"`
@@ -190,7 +228,7 @@ func NewMySQLConnectionEnv() *MySQLConnectionEnv {
 
 func (mc *MySQLConnectionEnv) ConnectDB() (*sqlx.DB, error) {
 	dsn := fmt.Sprintf("%v:%v@tcp(%v:%v)/%v?parseTime=true&loc=Asia%%2FTokyo", mc.User, mc.Password, mc.Host, mc.Port, mc.DBName)
-	return sqlx.Open("mysql", dsn)
+	return sqlx.Open("nrmysql", dsn)
 }
 
 func init() {
@@ -209,7 +247,24 @@ func init() {
 func main() {
 	e := echo.New()
 	e.Debug = true
-	e.Logger.SetLevel(log.DEBUG)
+	e.Logger.SetLevel(log.ERROR)
+
+	if os.Getenv("NEW_RELIC_LICENSE_KEY") != "" {
+		app, err := newrelic.NewApplication(
+			newrelic.ConfigAppName("isucon-golang-app"),
+			newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
+		)
+
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		log.Info("success newrelic init")
+		e.Use(nrecho.Middleware(app))
+	} else {
+		fmt.Println("NEW_RELIC_LICENSE_KEY")
+		log.Info("no config newrelic")
+	}
 
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
@@ -257,16 +312,22 @@ func main() {
 	e.Logger.Fatal(e.Start(serverPort))
 }
 
-func getSession(r *http.Request) (*sessions.Session, error) {
+func getSession(c echo.Context, r *http.Request) (*sessions.Session, error) {
+	txn := nrecho.FromContext(c).StartSegment("getSession")
+	defer txn.End()
 	session, err := sessionStore.Get(r, sessionName)
 	if err != nil {
+		fmt.Println(err)
 		return nil, err
 	}
 	return session, nil
 }
 
 func getUserIDFromSession(c echo.Context) (string, int, error) {
-	session, err := getSession(c.Request())
+	txn := nrecho.FromContext(c).StartSegment("getUserIDFromSession")
+	defer txn.End()
+
+	session, err := getSession(c, c.Request())
 	if err != nil {
 		return "", http.StatusInternalServerError, fmt.Errorf("failed to get session: %v", err)
 	}
@@ -274,16 +335,17 @@ func getUserIDFromSession(c echo.Context) (string, int, error) {
 	if !ok {
 		return "", http.StatusUnauthorized, fmt.Errorf("no session")
 	}
-
 	jiaUserID := _jiaUserID.(string)
 	var count int
 
-	err = db.Get(&count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?",
-		jiaUserID)
+	const query = "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?"
+	s := createDataBaseSegment(query, jiaUserID)
+	s.StartTime = nrecho.FromContext(c).StartSegmentNow()
+	err = db.Get(&count, query, jiaUserID)
+	s.End()
 	if err != nil {
 		return "", http.StatusInternalServerError, fmt.Errorf("db error: %v", err)
 	}
-
 	if count == 0 {
 		return "", http.StatusUnauthorized, fmt.Errorf("not found: user")
 	}
@@ -339,6 +401,7 @@ func postInitialize(c echo.Context) error {
 // POST /api/auth
 // サインアップ・サインイン
 func postAuthentication(c echo.Context) error {
+	//defer nrecho.FromContext(c).End()
 	reqJwt := strings.TrimPrefix(c.Request().Header.Get("Authorization"), "Bearer ")
 
 	token, err := jwt.Parse(reqJwt, func(token *jwt.Token) (interface{}, error) {
@@ -377,7 +440,7 @@ func postAuthentication(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	session, err := getSession(c.Request())
+	session, err := getSession(c, c.Request())
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -406,7 +469,7 @@ func postSignout(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	session, err := getSession(c.Request())
+	session, err := getSession(c, c.Request())
 	if err != nil {
 		c.Logger().Error(err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -425,6 +488,8 @@ func postSignout(c echo.Context) error {
 // GET /api/user/me
 // サインインしている自分自身の情報を取得
 func getMe(c echo.Context) error {
+	txn := nrecho.FromContext(c).StartSegment("getMe")
+	defer txn.End()
 	jiaUserID, errStatusCode, err := getUserIDFromSession(c)
 	if err != nil {
 		if errStatusCode == http.StatusUnauthorized {
@@ -442,6 +507,7 @@ func getMe(c echo.Context) error {
 // GET /api/isu
 // ISUの一覧を取得
 func getIsuList(c echo.Context) error {
+	txn := nrecho.FromContext(c)
 	jiaUserID, errStatusCode, err := getUserIDFromSession(c)
 	if err != nil {
 		if errStatusCode == http.StatusUnauthorized {
@@ -459,15 +525,16 @@ func getIsuList(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
+	const query = "SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC"
+	s := createDataBaseSegment(query, jiaUserID)
+	s.StartTime = txn.StartSegmentNow()
 	isuList := []Isu{}
-	err = tx.Select(
-		&isuList,
-		"SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC",
-		jiaUserID)
+	err = tx.Select(&isuList, query, jiaUserID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	defer s.End()
 
 	responseList := []GetIsuListResponse{}
 	for _, isu := range isuList {
@@ -1077,35 +1144,49 @@ func calculateConditionLevel(condition string) (string, error) {
 // GET /api/trend
 // ISUの性格毎の最新のコンディション情報
 func getTrend(c echo.Context) error {
+	txn := nrecho.FromContext(c)
+	defer txn.End()
+
 	characterList := []Isu{}
-	err := db.Select(&characterList, "SELECT `character` FROM `isu` GROUP BY `character`")
+	const query = "SELECT `character` FROM `isu` GROUP BY `character`"
+	s := createDataBaseSegment(query)
+	s.StartTime = nrecho.FromContext(c).StartSegmentNow()
+	err := db.Select(&characterList, query)
+	defer s.End()
+	//
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
 	res := []TrendResponse{}
-
 	for _, character := range characterList {
 		isuList := []Isu{}
-		err = db.Select(&isuList,
-			"SELECT * FROM `isu` WHERE `character` = ?",
+		select_isulist_query := "SELECT * FROM `isu` WHERE `character` = ?"
+		select_isu_condition := createDataBaseSegment(select_isulist_query, character.Character)
+		select_isu_condition.StartTime = nrecho.FromContext(c).StartSegmentNow()
+		err = db.Select(&isuList, select_isulist_query,
 			character.Character,
 		)
+		defer select_isu_condition.End()
 		if err != nil {
 			c.Logger().Errorf("db error: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
-
+		//defer select_isu_condition.End()
 		characterInfoIsuConditions := []*TrendCondition{}
 		characterWarningIsuConditions := []*TrendCondition{}
 		characterCriticalIsuConditions := []*TrendCondition{}
 		for _, isu := range isuList {
 			conditions := []IsuCondition{}
+			select_isucondition_query := "SELECT `condition`, timestamp FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC LIMIT 1"
+			select_isucondition := createDataBaseSegment(select_isucondition_query, isu.JIAIsuUUID)
+			select_isucondition.StartTime = nrecho.FromContext(c).StartSegmentNow()
 			err = db.Select(&conditions,
-				"SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY timestamp DESC",
+				select_isucondition_query,
 				isu.JIAIsuUUID,
 			)
+			defer select_isucondition.End()
 			if err != nil {
 				c.Logger().Errorf("db error: %v", err)
 				return c.NoContent(http.StatusInternalServerError)
@@ -1159,6 +1240,8 @@ func getTrend(c echo.Context) error {
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
 	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
+	txn := nrecho.FromContext(c)
+	defer txn.End()
 	dropProbability := 0.9
 	if rand.Float64() <= dropProbability {
 		c.Logger().Warnf("drop post isu condition request")
@@ -1186,7 +1269,11 @@ func postIsuCondition(c echo.Context) error {
 	defer tx.Rollback()
 
 	var count int
-	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?", jiaIsuUUID)
+	select_isu_count_query := "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?"
+	select_isu_count := createDataBaseSegment(select_isu_count_query, jiaIsuUUID)
+	select_isu_count.StartTime = txn.StartSegmentNow()
+	err = tx.Get(&count, select_isu_count_query, jiaIsuUUID)
+	defer select_isu_count.End()
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1197,22 +1284,48 @@ func postIsuCondition(c echo.Context) error {
 
 	for _, cond := range req {
 		timestamp := time.Unix(cond.Timestamp, 0)
-
 		if !isValidConditionFormat(cond.Condition) {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
 
+		insert_isu_condition_query := "INSERT INTO `isu_condition`" +
+			"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)" +
+			"	VALUES (?, ?, ?, ?, ?)"
+		insert_isu_condition := createDataBaseSegment(insert_isu_condition_query, jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
+		insert_isu_condition.StartTime = txn.StartSegmentNow()
 		_, err = tx.Exec(
-			"INSERT INTO `isu_condition`"+
-				"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
-				"	VALUES (?, ?, ?, ?, ?)",
+			insert_isu_condition_query,
 			jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
+		defer insert_isu_condition.End()
 		if err != nil {
 			c.Logger().Errorf("db error: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
-
 	}
+
+	//request := []BulkInsertPostIsuConditionRequest{}
+	//for i := 0; i < len(req); i++ {
+	//	timestamp := time.Unix(req[i].Timestamp, 0)
+	//
+	//	request[i].JiaIsuUUID = jiaIsuUUID
+	//	request[i].Timestamp = timestamp
+	//	request[i].IsSitting = req[i].IsSitting
+	//	request[i].Condition = req[i].Condition
+	//	request[i].Message = req[i].Message
+	//}
+	//
+	//insert_isu_condition_query := "INSERT INTO isu_condition (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`) " +
+	//	"VALUES (`:jia_isu_uuid`, `:timestamp`, `:is_sitting`, `:condition`, `:message`)"
+	//insert_isu_condition := createDataBaseSegment(insert_isu_condition_query, request)
+	//insert_isu_condition.StartTime = txn.StartSegmentNow()
+	//_, err = tx.NamedExec(insert_isu_condition_query, request)
+	//if err != nil {
+	//	if err != nil {
+	//		c.Logger().Errorf("db error: %v", err)
+	//		return c.NoContent(http.StatusInternalServerError)
+	//	}
+	//}
+	//defer insert_isu_condition.End()
 
 	err = tx.Commit()
 	if err != nil {
@@ -1259,4 +1372,60 @@ func isValidConditionFormat(conditionStr string) bool {
 
 func getIndex(c echo.Context) error {
 	return c.File(frontendContentsPath + "/index.html")
+}
+
+func createDataBaseSegment(query string, params ...interface{}) newrelic.DatastoreSegment {
+	mySQLConnectionData = NewMySQLConnectionEnv()
+
+	queryParams := make(map[string]interface{})
+	var i = 0
+	for _, param := range params {
+		switch x := param.(type) {
+		case []interface{}:
+			for _, p := range x {
+				queryParams["?_"+strconv.Itoa(i)] = p
+				i++
+			}
+		case interface{}:
+			queryParams["?_"+strconv.Itoa(i)] = x
+			i++
+		default:
+			//ignore
+		}
+	}
+
+	s := cCommentRegex.ReplaceAllString(query, "")
+	s = lineCommentRegex.ReplaceAllString(s, "")
+	s = sqlPrefixRegex.ReplaceAllString(s, "")
+	op := strings.ToLower(firstWordRegex.FindString(s))
+	var operation, collection = "", ""
+	if rg, ok := sqlOperations[op]; ok {
+		operation = op
+		if nil != rg {
+			if m := rg.FindStringSubmatch(s); len(m) > 1 {
+				collection = extractTable(m[1])
+			}
+		}
+	}
+
+	return newrelic.DatastoreSegment{
+		Product:            newrelic.DatastoreMySQL,
+		Collection:         collection,
+		Operation:          operation,
+		ParameterizedQuery: query,
+		QueryParameters:    queryParams,
+		Host:               mySQLConnectionData.Host,
+		PortPathOrID:       mySQLConnectionData.Port,
+		DatabaseName:       mySQLConnectionData.DBName,
+	}
+}
+
+//クエリからテーブル名と操作名をパースする処理はAgentのコードから流用
+//the following code is copied from https://github.com/newrelic/go-agent/blob/06c801d5571056abac8ac9dfa07cf12ca869e920/v3/newrelic/sqlparse/sqlparse.go
+func extractTable(s string) string {
+	s = extractTableRegex.ReplaceAllString(s, "")
+	if idx := strings.Index(s, "."); idx > 0 {
+		s = s[idx+1:]
+	}
+	return s
 }
