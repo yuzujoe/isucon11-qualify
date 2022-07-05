@@ -1173,6 +1173,8 @@ func getTrend(c echo.Context) error {
 // POST /api/condition/:jia_isu_uuid
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
+	txn := nrecho.FromContext(c)
+	defer txn.End()
 	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
 	dropProbability := 0.9
 	if rand.Float64() <= dropProbability {
@@ -1201,7 +1203,11 @@ func postIsuCondition(c echo.Context) error {
 	defer tx.Rollback()
 
 	var count int
-	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?", jiaIsuUUID)
+	select_isu_count_query := "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?"
+	select_isu_count := createDataStoreSegment(select_isu_count_query, "isu", "SELECT", jiaIsuUUID)
+	select_isu_count.StartTime = txn.StartSegmentNow()
+	err = tx.Get(&count, select_isu_count_query, jiaIsuUUID)
+	select_isu_count.End()
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1274,4 +1280,36 @@ func isValidConditionFormat(conditionStr string) bool {
 
 func getIndex(c echo.Context) error {
 	return c.File(frontendContentsPath + "/index.html")
+}
+
+func createDataStoreSegment(query, collection, operation string, params ...interface{}) newrelic.DatastoreSegment {
+	mySQLConnectionData = NewMySQLConnectionEnv()
+
+	queryParams := make(map[string]interface{})
+	var i = 0
+	for _, param := range params {
+		switch x := param.(type) {
+		case []interface{}:
+			for _, p := range x {
+				queryParams["?_"+strconv.Itoa(i)] = p
+				i++
+			}
+		case interface{}:
+			queryParams["?_"+strconv.Itoa(i)] = x
+			i++
+		default:
+			//ignore
+		}
+	}
+
+	return newrelic.DatastoreSegment{
+		Product:            newrelic.DatastoreMySQL,
+		Collection:         collection,
+		Operation:          operation,
+		ParameterizedQuery: query,
+		QueryParameters:    queryParams,
+		Host:               mySQLConnectionData.Host,
+		PortPathOrID:       mySQLConnectionData.Port,
+		DatabaseName:       mySQLConnectionData.DBName,
+	}
 }
