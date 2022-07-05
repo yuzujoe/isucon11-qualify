@@ -1222,12 +1222,15 @@ func postIsuCondition(c echo.Context) error {
 		if !isValidConditionFormat(cond.Condition) {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
-
+		insert_isu_condition_query := "INSERT INTO `isu_condition`" +
+			"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)" +
+			"	VALUES (?, ?, ?, ?, ?)"
+		insert_isu_condition := createDataStoreSegment(insert_isu_condition_query, "isu_condition", "INSERT", jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
+		insert_isu_condition.StartTime = txn.StartSegmentNow()
 		_, err = tx.Exec(
-			"INSERT INTO `isu_condition`"+
-				"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
-				"	VALUES (?, ?, ?, ?, ?)",
+			insert_isu_condition_query,
 			jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
+		insert_isu_condition.End()
 		if err != nil {
 			c.Logger().Errorf("db error: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
