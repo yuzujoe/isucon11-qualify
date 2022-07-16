@@ -1204,15 +1204,15 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusBadRequest, "bad request body")
 	}
 
-	tx, err := db.Beginx()
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	defer tx.Rollback()
+	//tx, err := db.Beginx()
+	//if err != nil {
+	//	c.Logger().Errorf("db error: %v", err)
+	//	return c.NoContent(http.StatusInternalServerError)
+	//}
+	//defer tx.Rollback()
 
 	var count int
-	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ? LIMIT 1", jiaIsuUUID)
+	err = db.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ? LIMIT 1", jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1239,29 +1239,39 @@ func postIsuCondition(c echo.Context) error {
 
 		if len(args) >= chunkSize*5 {
 			currentSql = strings.TrimSuffix(currentSql, ",")
-			_, err = tx.Exec(currentSql, args...)
+			go func(currentSql string, args []interface{}) {
+				_, err := db.Exec(currentSql, args...)
+				if err != nil {
+					log.Errorf("[Async] db error: %v", err)
+				}
+				//if err != nil {
+				//	c.Logger().Errorf("db error: %v", err)
+				//	return c.NoContent(http.StatusInternalServerError)
+				//}
+			}(currentSql, args)
 			currentSql = originalSql
 			args = make([]interface{}, 0, chunkSize*5)
-			if err != nil {
-				c.Logger().Errorf("db error: %v", err)
-				return c.NoContent(http.StatusInternalServerError)
-			}
 		}
 	}
 	if len(args) > 0 {
 		currentSql = strings.TrimSuffix(currentSql, ",")
-		_, err = tx.Exec(currentSql, args...)
-		if err != nil {
-			c.Logger().Errorf("db error: %v", err)
-			return c.NoContent(http.StatusInternalServerError)
-		}
+		go func(currentSql string, args []interface{}) {
+			_, err := db.Exec(currentSql, args...)
+			if err != nil {
+				log.Errorf("[Async] db error: %v", err)
+			}
+			//if err != nil {
+			//	c.Logger().Errorf("db error: %v", err)
+			//	return c.NoContent(http.StatusInternalServerError)
+			//}
+		}(currentSql, args)
 	}
 
-	err = tx.Commit()
-	if err != nil {
-		c.Logger().Errorf("db error: %v", err)
-		return c.NoContent(http.StatusInternalServerError)
-	}
+	//err = tx.Commit()
+	//if err != nil {
+	//	c.Logger().Errorf("db error: %v", err)
+	//	return c.NoContent(http.StatusInternalServerError)
+	//}
 
 	return c.NoContent(http.StatusAccepted)
 }
