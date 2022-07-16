@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
+	goredis "github.com/go-redis/redis/v8"
 	"github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
@@ -46,6 +47,7 @@ const (
 
 var (
 	db                  *sqlx.DB
+	redis               *goredis.Client
 	sessionStore        sessions.Store
 	mySQLConnectionData *MySQLConnectionEnv
 
@@ -263,6 +265,13 @@ func main() {
 	}
 	db.SetMaxOpenConns(10)
 	defer db.Close()
+
+	// Redis を追加
+	redis = goredis.NewClient(&goredis.Options{
+		Addr:     os.Getenv("REDIS_ADDR"),
+		Password: "",
+		DB:       0,
+	})
 
 	postIsuConditionTargetBaseURL = os.Getenv("POST_ISUCONDITION_TARGET_BASE_URL")
 	if postIsuConditionTargetBaseURL == "" {
@@ -764,7 +773,7 @@ func getIsuGraph(c echo.Context) error {
 	defer tx.Rollback()
 
 	var count int
-	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ?",
+	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_user_id` = ? AND `jia_isu_uuid` = ? LIMIT 1",
 		jiaUserID, jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
@@ -902,9 +911,9 @@ func calculateGraphDataPoint(isuConditions []IsuCondition) (GraphDataPoint, erro
 	for _, condition := range isuConditions {
 		badConditionsCount := 0
 
-		if !isValidConditionFormat(condition.Condition) {
-			return GraphDataPoint{}, fmt.Errorf("invalid condition format")
-		}
+		//if !isValidConditionFormat(condition.Condition) {
+		//	return GraphDataPoint{}, fmt.Errorf("invalid condition format")
+		//}
 
 		for _, condStr := range strings.Split(condition.Condition, ",") {
 			keyValue := strings.Split(condStr, "=")
@@ -1203,7 +1212,7 @@ func postIsuCondition(c echo.Context) error {
 	defer tx.Rollback()
 
 	var count int
-	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ?", jiaIsuUUID)
+	err = tx.Get(&count, "SELECT COUNT(*) FROM `isu` WHERE `jia_isu_uuid` = ? LIMIT 1", jiaIsuUUID)
 	if err != nil {
 		c.Logger().Errorf("db error: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
@@ -1212,6 +1221,12 @@ func postIsuCondition(c echo.Context) error {
 		return c.String(http.StatusNotFound, "not found: isu")
 	}
 
+	chunkSize := 2000
+	originalSql := "INSERT INTO `isu_condition`" +
+		"  (`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)" +
+		"  VALUES"
+	currentSql := originalSql
+	args := make([]interface{}, 0, chunkSize*5)
 	for _, cond := range req {
 		timestamp := time.Unix(cond.Timestamp, 0)
 
@@ -1219,16 +1234,27 @@ func postIsuCondition(c echo.Context) error {
 			return c.String(http.StatusBadRequest, "bad request body")
 		}
 
-		_, err = tx.Exec(
-			"INSERT INTO `isu_condition`"+
-				"	(`jia_isu_uuid`, `timestamp`, `is_sitting`, `condition`, `message`)"+
-				"	VALUES (?, ?, ?, ?, ?)",
-			jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
+		currentSql += "(?, ?, ?, ?, ?),"
+		args = append(args, jiaIsuUUID, timestamp, cond.IsSitting, cond.Condition, cond.Message)
+
+		if len(args) >= chunkSize*5 {
+			currentSql = strings.TrimSuffix(currentSql, ",")
+			_, err = tx.Exec(currentSql, args...)
+			currentSql = originalSql
+			args = make([]interface{}, 0, chunkSize*5)
+			if err != nil {
+				c.Logger().Errorf("db error: %v", err)
+				return c.NoContent(http.StatusInternalServerError)
+			}
+		}
+	}
+	if len(args) > 0 {
+		currentSql = strings.TrimSuffix(currentSql, ",")
+		_, err = tx.Exec(currentSql, args...)
 		if err != nil {
 			c.Logger().Errorf("db error: %v", err)
 			return c.NoContent(http.StatusInternalServerError)
 		}
-
 	}
 
 	err = tx.Commit()
