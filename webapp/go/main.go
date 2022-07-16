@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/newrelic/go-agent/v3/integrations/nrecho-v4"
+	"github.com/newrelic/go-agent/v3/newrelic"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -214,6 +216,22 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
+	var app *newrelic.Application
+	var err error
+	app, err = newrelic.NewApplication(
+		newrelic.ConfigAppName(os.Getenv("NEW_RELIC_APP_NAME")),
+		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
+		newrelic.ConfigAppLogEnabled(false),
+	)
+
+	if err != nil {
+		fmt.Errorf("failed to init newrelic NewApplication reaseon: %v", err)
+	} else {
+		fmt.Println("newrelic init success")
+	}
+
+	e.Use(nrecho.Middleware(app))
+
 	e.POST("/initialize", postInitialize)
 
 	e.POST("/api/auth", postAuthentication)
@@ -238,7 +256,6 @@ func main() {
 
 	mySQLConnectionData = NewMySQLConnectionEnv()
 
-	var err error
 	db, err = mySQLConnectionData.ConnectDB()
 	if err != nil {
 		e.Logger.Fatalf("failed to connect db: %v", err)
