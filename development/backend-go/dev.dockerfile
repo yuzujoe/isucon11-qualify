@@ -20,6 +20,7 @@ RUN ln -sf /usr/share/zoneinfo/Asia/Tokyo /etc/localtime
 COPY webapp/go/go.mod .
 COPY webapp/go/go.sum .
 
+RUN go mod tidy
 RUN go mod download
 
 COPY webapp/public /webapp/public
