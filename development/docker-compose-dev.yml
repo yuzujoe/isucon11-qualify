@@ -13,6 +13,8 @@ services:
       MYSQL_PASS: isucon
       POST_ISUCONDITION_TARGET_BASE_URL: http://backend-go:3000
       REDIS_ADDR: redis:6379
+      NEW_RELIC_LICENSE_KEY: ${NEW_RELIC_LICENSE_KEY}
+      NEW_RELIC_APP_NAME: ${NEW_RELIC_APP_NAME}
     entrypoint: dockerize -wait tcp://mysql-backend:3306 -timeout 60s
     command: air -c /development/air.toml
     ports:
